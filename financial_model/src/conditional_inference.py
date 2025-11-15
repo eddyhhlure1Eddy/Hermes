@@ -104,10 +104,20 @@ class ConditionalPredictor:
         feature_data = recent_data[features].values
         scaler = StandardScaler()
         feature_data_normalized = scaler.fit_transform(feature_data)
-        
+
+        target_scaler = StandardScaler()
+        target_scaler.fit(recent_data['close'].values.reshape(-1, 1))
+
         predictions = []
+        predictions_denorm = []
+        predicted_ohlcv = []
         current_sequence = feature_data_normalized.copy()
-        
+        last_close = recent_data['close'].iloc[-1]
+
+        avg_volume = recent_data['volume'].tail(20).mean()
+        recent_returns = recent_data['close'].pct_change().tail(20)
+        avg_volatility = recent_returns.std()
+
         for step in range(future_steps):
             seq_tensor = torch.FloatTensor(current_sequence).unsqueeze(0).to(self.device)
             industry_tensor = torch.LongTensor([industry_idx]).to(self.device)
@@ -117,20 +127,51 @@ class ConditionalPredictor:
             with torch.no_grad():
                 with torch.amp.autocast('cuda', enabled=self.device.type == 'cuda'):
                     pred = self.model(seq_tensor, industry_tensor, style_tensor, regime_tensor)
-            
-            pred_value = pred.cpu().numpy()[0, 0]
-            predictions.append(pred_value)
-            
-            last_features = current_sequence[-1].copy()
-            last_features[features.index('close')] = pred_value
-            
-            current_sequence = np.vstack([current_sequence[1:], last_features])
-        
-        predictions = np.array(predictions)
-        
-        target_scaler = StandardScaler()
-        target_scaler.fit(recent_data['close'].values.reshape(-1, 1))
-        predictions_denorm = target_scaler.inverse_transform(predictions.reshape(-1, 1)).flatten()
+
+            pred_value_norm = pred.cpu().numpy()[0, 0]
+            predictions.append(pred_value_norm)
+
+            pred_value_denorm = target_scaler.inverse_transform([[pred_value_norm]])[0, 0]
+            predictions_denorm.append(pred_value_denorm)
+
+            prev_close = current_sequence[-1, features.index('close')]
+            prev_close_denorm = target_scaler.inverse_transform([[prev_close]])[0, 0]
+
+            price_change_pct = (pred_value_denorm - prev_close_denorm) / prev_close_denorm
+
+            daily_volatility = avg_volatility if step == 0 else avg_volatility * (1 + 0.1 * step)
+            high_low_range = abs(pred_value_denorm * daily_volatility * 2)
+
+            if price_change_pct > 0:
+                next_open = prev_close_denorm * (1 + price_change_pct * 0.3)
+                next_close = pred_value_denorm
+                next_high = max(next_open, next_close) * (1 + daily_volatility * 0.5)
+                next_low = min(next_open, next_close) * (1 - daily_volatility * 0.3)
+            else:
+                next_open = prev_close_denorm * (1 + price_change_pct * 0.3)
+                next_close = pred_value_denorm
+                next_high = max(next_open, next_close) * (1 + daily_volatility * 0.3)
+                next_low = min(next_open, next_close) * (1 - daily_volatility * 0.5)
+
+            volume_change_factor = 1 + abs(price_change_pct) * 2
+            volume_random_factor = np.random.uniform(0.8, 1.2)
+            next_volume = avg_volume * volume_change_factor * volume_random_factor
+
+            predicted_ohlcv.append({
+                'open': next_open,
+                'high': next_high,
+                'low': next_low,
+                'close': next_close,
+                'volume': next_volume
+            })
+
+            next_features_raw = np.array([next_open, next_high, next_low, next_close, next_volume]).reshape(1, -1)
+            next_features_norm = scaler.transform(next_features_raw)[0]
+
+            current_sequence = np.vstack([current_sequence[1:], next_features_norm])
+
+        predictions_denorm = np.array(predictions_denorm)
+        predicted_ohlcv_df = pd.DataFrame(predicted_ohlcv)
         
         metadata = {
             'stock_code': stock_code,
@@ -139,9 +180,10 @@ class ConditionalPredictor:
             'volatility': volatility_20d,
             'style': ['low_vol', 'medium_vol', 'high_vol'][style_idx],
             'regime': current_regime,
-            'last_price': recent_data['close'].iloc[-1]
+            'last_price': recent_data['close'].iloc[-1],
+            'predicted_ohlcv': predicted_ohlcv_df
         }
-        
+
         return predictions_denorm, metadata
     
     def predict_next_day(

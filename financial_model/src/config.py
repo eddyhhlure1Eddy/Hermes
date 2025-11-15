@@ -40,7 +40,7 @@ class TrainingConfig:
     learning_rate: float = 0.001
     weight_decay: float = 0.0001
 
-    early_stopping_patience: int = 10
+    early_stopping_patience: int = 50
 
     train_split: float = 0.7
     val_split: float = 0.15
