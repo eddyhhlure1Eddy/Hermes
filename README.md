@@ -1,13 +1,8 @@
-```bibtex
-@misc{eddy2025mdct,
-  author = {Eddy},
-  title = {Multi-Dimensional Conditional Transformer for Financial Time Series Prediction with Flash Attention Acceleration},
-  year = {2025},
-  publisher = {Zenodo},
-  doi = {10.5281/zenodo.17618147},
-  url = {https://doi.org/10.5281/zenodo.17618147}
-}
-```
+# Hermes - Multi-Dimensional Conditional Transformer for Financial Time Series Prediction
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17618147.svg)](https://doi.org/10.5281/zenodo.17618147)
+
+A novel deep learning framework for financial time series prediction using Multi-Dimensional Conditional Transformer (MDCT) architecture with Flash Attention acceleration.
 
 <img width="1381" height="689" alt="image" src="https://github.com/user-attachments/assets/88164665-aa7d-41f0-a8e9-ca94307d2d81" />
 <img width="1090" height="326" alt="image" src="https://github.com/user-attachments/assets/d10e5e5b-fcc6-4153-b3ab-6355e1787005" />
