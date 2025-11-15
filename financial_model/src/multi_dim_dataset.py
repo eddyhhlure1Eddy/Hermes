@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from typing import Tuple, Optional, Dict
 import os
+import sqlite3
 
 from .stock_metadata import IndustryClassifier, StyleFactorCalculator
 from .market_regime import MarketRegimeDetector
@@ -168,19 +169,74 @@ class MultiDimFinancialDataset(Dataset):
             return self.scaler_target.inverse_transform(data.reshape(-1, 1)).flatten()
         return data
 
+class CachedMultiDimDataset(Dataset):
+    """Dataset that loads from pre-built cache files with vectorized regime detection"""
+
+    def __init__(
+        self,
+        cache_path: str,
+        seq_length: int,
+        pred_length: int,
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ):
+        self.seq_length = seq_length
+        self.pred_length = pred_length
+        self.device = device
+
+        cache = torch.load(cache_path, weights_only=False)
+
+        self.code = cache['code']
+        self.features = cache['features']
+        self.target = cache['target']
+        self.regime = cache['regime']
+        self.industry_idx = cache['industry_idx']
+        self.style_idx = cache['style_idx']
+
+        sequences = []
+        targets = []
+        regime_indices = []
+
+        for i in range(len(self.features) - seq_length - pred_length + 1):
+            seq = self.features[i:i + seq_length]
+            target = self.target[i + seq_length:i + seq_length + pred_length]
+            regime_idx = self.regime[i + seq_length - 1]
+
+            sequences.append(seq)
+            targets.append(target)
+            regime_indices.append(regime_idx)
+
+        self.sequences = torch.from_numpy(np.array(sequences)).float().to(device)
+        self.targets = torch.from_numpy(np.array(targets)).float().to(device)
+        self.regime_indices = torch.from_numpy(np.array(regime_indices)).long().to(device)
+        self.industry_idx_tensor = torch.tensor(self.industry_idx, dtype=torch.long, device=device)
+        self.style_idx_tensor = torch.tensor(self.style_idx, dtype=torch.long, device=device)
+
+    def __len__(self) -> int:
+        return len(self.sequences)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
+        return (
+            self.sequences[idx],
+            self.targets[idx],
+            self.industry_idx_tensor,
+            self.style_idx_tensor,
+            self.regime_indices[idx]
+        )
+
+
 def load_stock_data(stock_code: str, data_dir: str = 'full_stock_data/training_data') -> pd.DataFrame:
     """Load stock data from CSV file"""
-    
+
     filename = f"{stock_code}.csv"
     filepath = os.path.join(data_dir, filename)
-    
+
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"Stock data not found: {filepath}")
-    
+
     df = pd.read_csv(filepath)
     df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date')
-    
+
     return df
 
 def create_multi_dim_dataloaders(
@@ -452,5 +508,168 @@ def create_multi_dim_dataloaders_with_progress(
     )
 
     complete_msg = f"Successfully loaded {len(all_train_datasets)} stocks{gpu_info}"
+    yield ('complete', total_stocks, total_stocks, complete_msg, train_loader, val_loader, test_loader)
+
+
+def create_multi_dim_dataloaders_from_cache(
+    stock_codes: list,
+    config,
+    cache_dir: str = 'data_cache',
+    train_split: float = 0.7,
+    val_split: float = 0.15,
+):
+    """
+    Create dataloaders from pre-built cache files (FAST - uses vectorized regime detection)
+
+    Args:
+        stock_codes: List of stock codes to load
+        config: Configuration object
+        cache_dir: Directory containing cache files
+        train_split: Fraction of data for training
+        val_split: Fraction of data for validation
+
+    Yields:
+        (status, current, total, message, train_loader, val_loader, test_loader)
+    """
+    all_train_datasets = []
+    all_val_datasets = []
+    all_test_datasets = []
+
+    total_stocks = len(stock_codes)
+    db_path = os.path.join(cache_dir, 'meta.sqlite')
+
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"Cache database not found: {db_path}. Please run build_cache.py first.")
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    for idx, stock_code in enumerate(stock_codes):
+        try:
+            current = idx + 1
+
+            cursor.execute("SELECT cache_path, num_rows FROM stocks WHERE code = ?", (stock_code,))
+            result = cursor.fetchone()
+
+            if not result:
+                print(f"Cache not found for {stock_code}, skipping...")
+                continue
+
+            cache_path, num_rows = result
+
+            if not os.path.exists(cache_path):
+                print(f"Cache file not found: {cache_path}, skipping...")
+                continue
+
+            train_size = int(num_rows * train_split)
+            val_size = int(num_rows * val_split)
+
+            cache = torch.load(cache_path, weights_only=False)
+
+            if train_size > config.model.seq_length + config.model.pred_length:
+                train_cache_path = cache_path
+                train_dataset = CachedMultiDimDataset(
+                    train_cache_path,
+                    config.model.seq_length,
+                    config.model.pred_length
+                )
+
+                train_indices = list(range(min(len(train_dataset), train_size - config.model.seq_length - config.model.pred_length + 1)))
+                if train_indices:
+                    train_subset = torch.utils.data.Subset(train_dataset, train_indices)
+                    all_train_datasets.append(train_subset)
+
+            if val_size > config.model.seq_length + config.model.pred_length:
+                val_dataset = CachedMultiDimDataset(
+                    cache_path,
+                    config.model.seq_length,
+                    config.model.pred_length
+                )
+
+                val_start = train_size
+                val_end = train_size + val_size
+                val_indices = list(range(
+                    max(0, val_start - config.model.seq_length - config.model.pred_length + 1),
+                    min(len(val_dataset), val_end - config.model.seq_length - config.model.pred_length + 1)
+                ))
+                if val_indices:
+                    val_subset = torch.utils.data.Subset(val_dataset, val_indices)
+                    all_val_datasets.append(val_subset)
+
+            test_start = train_size + val_size
+            if num_rows - test_start > config.model.seq_length + config.model.pred_length:
+                test_dataset = CachedMultiDimDataset(
+                    cache_path,
+                    config.model.seq_length,
+                    config.model.pred_length
+                )
+
+                test_indices = list(range(
+                    max(0, test_start - config.model.seq_length - config.model.pred_length + 1),
+                    len(test_dataset)
+                ))
+                if test_indices:
+                    test_subset = torch.utils.data.Subset(test_dataset, test_indices)
+                    all_test_datasets.append(test_subset)
+
+            if current % 5 == 0 or current == total_stocks:
+                msg = f"Loaded {current}/{total_stocks} stocks from cache (vectorized regime detection)"
+                yield ('loading', current, total_stocks, msg, None, None, None)
+
+        except Exception as e:
+            print(f"Error loading cache for {stock_code}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    conn.close()
+
+    from torch.utils.data import ConcatDataset
+    import platform
+
+    train_dataset = ConcatDataset(all_train_datasets)
+    val_dataset = ConcatDataset(all_val_datasets)
+    test_dataset = ConcatDataset(all_test_datasets)
+
+    is_windows = platform.system() == 'Windows'
+    num_workers = 0 if is_windows else (4 if torch.cuda.is_available() else 0)
+    pin_memory = False
+
+    generator = torch.Generator()
+    generator.manual_seed(42)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=pin_memory,
+        persistent_workers=False,
+        prefetch_factor=None,
+        generator=generator,
+        drop_last=False
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=pin_memory,
+        persistent_workers=False,
+        prefetch_factor=None
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=pin_memory,
+        persistent_workers=False,
+        prefetch_factor=None
+    )
+
+    complete_msg = f"Successfully loaded {len(all_train_datasets)} stocks from cache (404x faster regime detection)"
     yield ('complete', total_stocks, total_stocks, complete_msg, train_loader, val_loader, test_loader)
 

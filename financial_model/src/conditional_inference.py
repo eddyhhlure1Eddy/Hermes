@@ -22,20 +22,36 @@ class ConditionalPredictor:
     
     def __init__(self, checkpoint_path: str, config: Optional[Config] = None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        
+
         if config is None:
             self.config = checkpoint.get('config', Config())
         else:
             self.config = config
-        
+
+        state_dict = checkpoint['model_state_dict']
+
+        if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+            print("Detected torch.compile checkpoint, removing _orig_mod. prefix")
+            state_dict = {key.replace('_orig_mod.', ''): value for key, value in state_dict.items()}
+
+        uses_flash_attn = any('self_attn_qkv' in key for key in state_dict.keys())
+
+        if uses_flash_attn and not self.config.model.use_flash_attention:
+            print("Checkpoint uses Flash Attention, enabling it in config")
+            self.config.model.use_flash_attention = True
+        elif not uses_flash_attn and self.config.model.use_flash_attention:
+            print("Checkpoint uses standard attention, disabling Flash Attention in config")
+            self.config.model.use_flash_attention = False
+
         self.model = create_conditional_model(self.config)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(state_dict)
         self.model.eval()
-        
+
         print(f"Conditional model loaded from {checkpoint_path}")
         print(f"Device: {self.device}")
+        print(f"Using Flash Attention: {self.config.model.use_flash_attention}")
     
     def predict_stock(
         self,
@@ -97,9 +113,10 @@ class ConditionalPredictor:
             industry_tensor = torch.LongTensor([industry_idx]).to(self.device)
             style_tensor = torch.LongTensor([style_idx]).to(self.device)
             regime_tensor = torch.LongTensor([regime_idx]).to(self.device)
-            
+
             with torch.no_grad():
-                pred = self.model(seq_tensor, industry_tensor, style_tensor, regime_tensor)
+                with torch.amp.autocast('cuda', enabled=self.device.type == 'cuda'):
+                    pred = self.model(seq_tensor, industry_tensor, style_tensor, regime_tensor)
             
             pred_value = pred.cpu().numpy()[0, 0]
             predictions.append(pred_value)

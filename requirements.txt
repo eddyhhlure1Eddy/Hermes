@@ -1,4 +1,4 @@
-﻿torch>=2.0.0
+torch>=2.0.0
 gradio>=4.0.0
 pandas>=2.0.0
 numpy>=1.24.0
@@ -6,3 +6,5 @@ plotly>=5.14.0
 scikit-learn>=1.3.0
 tqdm>=4.65.0
 akshare>=1.12.0
+pytdx>=1.72
+flash-attn>=2.0.0

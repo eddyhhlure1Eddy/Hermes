@@ -53,10 +53,39 @@ class MarketRegimeDetector:
             return 'sideways'
     
     def detect_regime_series(self, prices: pd.Series) -> pd.Series:
-        """Detect regime for entire time series"""
-        
+        """Detect regime for entire time series (vectorized version)"""
+
+        n = len(prices)
+        regimes = np.full(n, 'sideways', dtype=object)
+
+        if n < self.ma_long:
+            return pd.Series(regimes, index=prices.index)
+
+        ma_short = prices.rolling(window=self.ma_short).mean()
+        ma_long = prices.rolling(window=self.ma_long).mean()
+
+        returns = prices.pct_change()
+        volatility = returns.rolling(window=20).std()
+
+        trend_strength = (ma_short - ma_long) / ma_long
+
+        bull_mask = (prices > ma_short) & (ma_short > ma_long) & (trend_strength > 0.05) & (volatility <= 0.03)
+        bear_mask = (prices < ma_short) & (ma_short < ma_long) & (trend_strength < -0.05) & (volatility <= 0.03)
+        volatile_mask = volatility > 0.03
+
+        regimes[bull_mask] = 'bull'
+        regimes[bear_mask] = 'bear'
+        regimes[volatile_mask] = 'volatile'
+
+        regimes[:self.ma_long] = 'sideways'
+
+        return pd.Series(regimes, index=prices.index)
+
+    def detect_regime_series_old(self, prices: pd.Series) -> pd.Series:
+        """Detect regime for entire time series (old loop version)"""
+
         regimes = []
-        
+
         for i in range(len(prices)):
             if i < self.ma_long:
                 regimes.append('sideways')
@@ -64,7 +93,7 @@ class MarketRegimeDetector:
                 window_prices = prices.iloc[max(0, i - 100):i + 1]
                 regime = self.detect_regime(window_prices)
                 regimes.append(regime)
-        
+
         return pd.Series(regimes, index=prices.index)
     
     @staticmethod

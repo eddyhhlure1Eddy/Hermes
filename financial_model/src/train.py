@@ -26,6 +26,7 @@ class Trainer:
         self.config = config
         self.device = config.model.device
         self.use_conditional = use_conditional
+        self.should_stop = False
 
         if use_conditional:
             self.model = create_conditional_model(config)
@@ -77,6 +78,8 @@ class Trainer:
         total_loss = 0
 
         for batch_data in tqdm(train_loader, desc="Training"):
+            if self.should_stop:
+                raise KeyboardInterrupt("Training stopped by user")
             if self.use_conditional:
                 batch_x, batch_y, industry_idx, style_idx, regime_idx = batch_data
                 batch_x = batch_x.to(self.device, non_blocking=True)
@@ -143,6 +146,8 @@ class Trainer:
 
         with torch.no_grad():
             for batch_data in val_loader:
+                if self.should_stop:
+                    raise KeyboardInterrupt("Training stopped by user")
                 if self.use_conditional:
                     batch_x, batch_y, industry_idx, style_idx, regime_idx = batch_data
                     batch_x = batch_x.to(self.device, non_blocking=True)
@@ -200,9 +205,20 @@ class Trainer:
     
     def save_checkpoint(self, filename: str):
         """Save model checkpoint"""
-        checkpoint_path = os.path.join(self.config.training.checkpoint_dir, filename)
+        if os.path.isabs(filename) or os.path.dirname(filename):
+            checkpoint_path = filename
+        else:
+            checkpoint_path = os.path.join(self.config.training.checkpoint_dir, filename)
+
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+
+        state_dict = self.model.state_dict()
+
+        if any(key.startswith('_orig_mod.') for key in state_dict.keys()):
+            state_dict = {key.replace('_orig_mod.', ''): value for key, value in state_dict.items()}
+
         torch.save({
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': state_dict,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'config': self.config,
             'train_losses': self.train_losses,

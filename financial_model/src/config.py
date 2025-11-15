@@ -25,6 +25,10 @@ class ModelConfig:
 
     use_flash_attention: bool = True
 
+    industry_embed_dim: int = 128
+    style_embed_dim: int = 64
+    regime_embed_dim: int = 64
+
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 @dataclass

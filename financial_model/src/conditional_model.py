@@ -10,6 +10,11 @@ import math
 from typing import Optional, Dict
 
 from .model import PositionalEncoding
+from .flash_attention_layer import (
+    FlashAttentionTransformerEncoderLayer,
+    FlashAttentionTransformerEncoder,
+    FLASH_ATTN_AVAILABLE
+)
 
 class ConditionalFinancialModel(nn.Module):
     """
@@ -33,10 +38,13 @@ class ConditionalFinancialModel(nn.Module):
         num_market_regimes: int = 4,
         dropout: float = 0.1,
         pred_length: int = 1,
-        use_flash_attention: bool = True
+        use_flash_attention: bool = True,
+        industry_embed_dim: int = 128,
+        style_embed_dim: int = 64,
+        regime_embed_dim: int = 64
     ):
         super().__init__()
-        
+
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
 
@@ -44,24 +52,42 @@ class ConditionalFinancialModel(nn.Module):
         self.input_projection = nn.Linear(input_dim, hidden_dim)
         self.positional_encoding = PositionalEncoding(d_model=hidden_dim, dropout=dropout)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 4,
-            dropout=dropout,
-            batch_first=True,
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers,
-        )
+        self.use_flash_attention = use_flash_attention and FLASH_ATTN_AVAILABLE
+
+        if self.use_flash_attention:
+            print(f"Using Flash Attention 2 for ConditionalFinancialModel")
+            encoder_layer = FlashAttentionTransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=hidden_dim * 4,
+                dropout=dropout,
+                batch_first=True,
+                use_flash_attn=True
+            )
+            self.transformer_encoder = FlashAttentionTransformerEncoder(
+                encoder_layer,
+                num_layers=num_layers,
+            )
+        else:
+            print(f"Flash Attention 2 not available, using standard PyTorch attention")
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=hidden_dim * 4,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.transformer_encoder = nn.TransformerEncoder(
+                encoder_layer,
+                num_layers=num_layers,
+            )
 
         # Embeddings for conditional inputs
-        self.industry_embedding = nn.Embedding(num_industries, 32)
-        self.style_embedding = nn.Embedding(num_style_factors, 16)
-        self.regime_embedding = nn.Embedding(num_market_regimes, 16)
+        self.industry_embedding = nn.Embedding(num_industries, industry_embed_dim)
+        self.style_embedding = nn.Embedding(num_style_factors, style_embed_dim)
+        self.regime_embedding = nn.Embedding(num_market_regimes, regime_embed_dim)
 
-        conditional_dim = 32 + 16 + 16
+        conditional_dim = industry_embed_dim + style_embed_dim + regime_embed_dim
 
         # Fusion layer combining sequence features and conditional context
         self.fusion_layer = nn.Sequential(
@@ -80,17 +106,6 @@ class ConditionalFinancialModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim // 2, pred_length),
         )
-
-        # Enable FlashAttention-style SDPA optimizations when available
-        self.use_flash_attention = use_flash_attention
-        if self.use_flash_attention and torch.cuda.is_available():
-            try:
-                import flash_attn  # type: ignore  # noqa: F401
-                torch.backends.cuda.enable_flash_sdp(True)
-                torch.backends.cuda.enable_mem_efficient_sdp(True)
-                torch.backends.cuda.enable_math_sdp(False)
-            except ImportError:
-                self.use_flash_attention = False
 
     def forward(
         self,
@@ -150,6 +165,9 @@ def create_conditional_model(config) -> ConditionalFinancialModel:
         dropout=config.model.dropout,
         pred_length=config.model.pred_length,
         use_flash_attention=config.model.use_flash_attention,
+        industry_embed_dim=config.model.industry_embed_dim,
+        style_embed_dim=config.model.style_embed_dim,
+        regime_embed_dim=config.model.regime_embed_dim,
     )
 
     return model.to(config.model.device)
