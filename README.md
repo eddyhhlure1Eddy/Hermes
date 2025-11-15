@@ -1,4 +1,12 @@
 <img width="1090" height="326" alt="image" src="https://github.com/user-attachments/assets/d10e5e5b-fcc6-4153-b3ab-6355e1787005" />
+<img width="1376" height="571" alt="image" src="https://github.com/user-attachments/assets/bca461fb-877e-42ff-b3df-854b9a8fde06" />
+<img width="1409" height="404" alt="image" src="https://github.com/user-attachments/assets/47ce2c7f-10f6-45b7-b188-82f79df21a65" />
+<img width="1393" height="601" alt="image" src="https://github.com/user-attachments/assets/e1bd2eaf-323b-4d83-9312-4677ba5bcdfa" />
+<img width="1413" height="604" alt="image" src="https://github.com/user-attachments/assets/8225ece5-b956-48e9-b56a-a67fdeba307e" />
+
+
+
+
 
 
 # A-Share Multi-Dimensional Financial Model
