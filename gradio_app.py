@@ -70,8 +70,15 @@ def check_flash_attention():
         return "❌ Flash Attention 不可用 / Not available"
 
 
-def get_available_stocks():
-    """Get list of available stock codes from training data directory"""
+def get_available_stocks(randomize=False):
+    """
+    Get list of available stock codes from training data directory
+
+    Args:
+        randomize: If True, shuffle the stock list for better diversity
+    """
+    import random
+
     data_dir = "full_stock_data/training_data"
 
     if not os.path.exists(data_dir):
@@ -79,6 +86,11 @@ def get_available_stocks():
 
     files = [f for f in os.listdir(data_dir) if f.endswith('.csv')]
     stock_codes = sorted([f.replace('.csv', '') for f in files])
+
+    if randomize:
+        stock_codes_copy = stock_codes.copy()
+        random.shuffle(stock_codes_copy)
+        return stock_codes_copy
 
     return stock_codes
 
@@ -1432,6 +1444,226 @@ def upload_data_and_predict(file, checkpoint_path):
     except Exception as e:
         return f"Error: {str(e)}", None
 
+def analyze_industry_trends(max_stocks_per_industry, prediction_days, checkpoint_path, progress=gr.Progress()):
+    """
+    Analyze and compare industry trends - historical vs predicted
+
+    Returns industry performance comparison with visualization
+    """
+    try:
+        if not os.path.exists(checkpoint_path):
+            return "Error: Checkpoint not found. Please train a model first.", None, None
+
+        data_dir = "full_stock_data/training_data"
+        if not os.path.exists(data_dir):
+            return "Error: Data directory not found.", None, None
+
+        all_stocks = get_available_stocks(randomize=True)
+        if not all_stocks:
+            return "Error: No stocks available.", None, None
+
+        max_stocks_per_industry = int(max_stocks_per_industry)
+        prediction_days = int(prediction_days)
+
+        predictor = ConditionalPredictor(checkpoint_path)
+
+        industry_data = {}
+        total_processed = 0
+
+        for stock_code in all_stocks:
+            try:
+                stock_file = os.path.join(data_dir, f"{stock_code}.csv")
+                data = pd.read_csv(stock_file)
+
+                if len(data) < 60:
+                    continue
+
+                predictions, metadata = predictor.predict_stock(
+                    stock_code=stock_code,
+                    recent_data=data,
+                    future_steps=prediction_days
+                )
+
+                industry = metadata['industry_l1']
+
+                if industry not in industry_data:
+                    industry_data[industry] = {
+                        'stocks': [],
+                        'current_prices': [],
+                        'predicted_prices': [],
+                        'increase_pcts': [],
+                        'historical_returns': []
+                    }
+
+                if len(industry_data[industry]['stocks']) >= max_stocks_per_industry:
+                    continue
+
+                current_price = metadata['last_price']
+                predicted_price = predictions[-1]
+                increase_pct = ((predicted_price - current_price) / current_price) * 100
+
+                recent_30d = data['close'].tail(30)
+                historical_return = ((recent_30d.iloc[-1] - recent_30d.iloc[0]) / recent_30d.iloc[0]) * 100
+
+                industry_data[industry]['stocks'].append(stock_code)
+                industry_data[industry]['current_prices'].append(current_price)
+                industry_data[industry]['predicted_prices'].append(predicted_price)
+                industry_data[industry]['increase_pcts'].append(increase_pct)
+                industry_data[industry]['historical_returns'].append(historical_return)
+
+                total_processed += 1
+                progress(total_processed / (max_stocks_per_industry * 12), desc=f"Analyzing {industry}")
+
+                if all(len(v['stocks']) >= max_stocks_per_industry for v in industry_data.values() if len(v['stocks']) > 0):
+                    if len(industry_data) >= 10:
+                        break
+
+            except Exception as e:
+                continue
+
+        if not industry_data:
+            return "No data collected. Try increasing stocks per industry.", None, None
+
+        industry_summary = []
+        for industry, data_dict in industry_data.items():
+            if len(data_dict['stocks']) == 0:
+                continue
+
+            avg_historical = np.mean(data_dict['historical_returns'])
+            avg_predicted = np.mean(data_dict['increase_pcts'])
+            stock_count = len(data_dict['stocks'])
+
+            industry_summary.append({
+                'industry': industry,
+                'stock_count': stock_count,
+                'avg_historical_30d': avg_historical,
+                'avg_predicted': avg_predicted,
+                'momentum_shift': avg_predicted - avg_historical,
+                'stocks': data_dict['stocks']
+            })
+
+        summary_df = pd.DataFrame(industry_summary)
+        summary_df = summary_df.sort_values('avg_predicted', ascending=False)
+
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                'Industry Performance Comparison',
+                'Momentum Shift (Predicted - Historical)',
+                'Historical 30-Day Returns',
+                'Predicted Returns Heatmap'
+            ),
+            specs=[
+                [{"type": "bar"}, {"type": "bar"}],
+                [{"type": "bar"}, {"type": "scatter"}]
+            ]
+        )
+
+        industries = summary_df['industry'].tolist()
+        historical = summary_df['avg_historical_30d'].tolist()
+        predicted = summary_df['avg_predicted'].tolist()
+        momentum = summary_df['momentum_shift'].tolist()
+
+        fig.add_trace(go.Bar(
+            name='Historical (30d)',
+            x=industries,
+            y=historical,
+            marker_color='lightblue',
+            text=[f"{v:.2f}%" for v in historical],
+            textposition='outside'
+        ), row=1, col=1)
+
+        fig.add_trace(go.Bar(
+            name=f'Predicted ({prediction_days}d)',
+            x=industries,
+            y=predicted,
+            marker_color='orange',
+            text=[f"{v:.2f}%" for v in predicted],
+            textposition='outside'
+        ), row=1, col=1)
+
+        momentum_colors = ['green' if m > 0 else 'red' for m in momentum]
+        fig.add_trace(go.Bar(
+            x=industries,
+            y=momentum,
+            marker_color=momentum_colors,
+            text=[f"{v:+.2f}%" for v in momentum],
+            textposition='outside',
+            showlegend=False
+        ), row=1, col=2)
+
+        fig.add_trace(go.Bar(
+            x=industries,
+            y=historical,
+            marker_color='steelblue',
+            showlegend=False
+        ), row=2, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=historical,
+            y=predicted,
+            mode='markers+text',
+            text=industries,
+            textposition='top center',
+            marker=dict(size=15, color=momentum, colorscale='RdYlGn', showscale=True),
+            showlegend=False
+        ), row=2, col=2)
+
+        fig.add_shape(
+            type="line",
+            x0=min(historical), y0=min(historical),
+            x1=max(historical), y1=max(historical),
+            line=dict(color="gray", width=2, dash="dash"),
+            row=2, col=2
+        )
+
+        fig.update_layout(
+            title=f'Industry Trend Analysis - {len(industry_data)} Industries',
+            height=900,
+            showlegend=True
+        )
+
+        fig.update_xaxes(tickangle=-45)
+        fig.update_xaxes(title_text="Historical Return %", row=2, col=2)
+        fig.update_yaxes(title_text="Predicted Return %", row=2, col=2)
+
+        result_text = f"""
+Industry Trend Analysis
+{'='*80}
+Total Industries Analyzed: {len(industry_data)}
+Stocks per Industry: {max_stocks_per_industry}
+Historical Period: Last 30 days
+Prediction Horizon: {prediction_days} days
+
+{'='*80}
+HOTTEST INDUSTRIES (Predicted Performance):
+{'='*80}
+"""
+
+        for idx, row in summary_df.head(10).iterrows():
+            trend = "📈 HEATING UP" if row['momentum_shift'] > 0 else "📉 COOLING DOWN"
+            result_text += f"""
+{row['industry'].upper()}:
+  Historical (30d): {row['avg_historical_30d']:+.2f}%
+  Predicted ({prediction_days}d): {row['avg_predicted']:+.2f}%
+  Momentum Shift: {row['momentum_shift']:+.2f}% {trend}
+  Sample Stocks: {', '.join(row['stocks'][:5])}
+  Total Stocks: {row['stock_count']}
+"""
+
+        result_text += f"\n{'='*80}\n"
+        result_text += "Interpretation:\n"
+        result_text += "- Green bars in Momentum Shift = Industry gaining strength\n"
+        result_text += "- Red bars = Industry losing momentum\n"
+        result_text += "- Points above diagonal line (bottom right) = Stronger predicted performance\n"
+
+        return result_text, fig, summary_df
+
+    except Exception as e:
+        import traceback
+        return f"Error: {str(e)}\n\n{traceback.format_exc()}", None, None
+
+
 def scan_stock_pool(max_stocks, prediction_days, checkpoint_path, min_increase_pct, progress=gr.Progress()):
     """
     Scan stock pool and rank by upward probability
@@ -1446,15 +1678,19 @@ def scan_stock_pool(max_stocks, prediction_days, checkpoint_path, min_increase_p
         if not os.path.exists(data_dir):
             return "Error: Data directory not found.", None
 
-        all_stocks = get_available_stocks()
+        all_stocks = get_available_stocks(randomize=True)
         if not all_stocks:
-            return "Error: No stocks available.", None
+            return "Error: No stocks available.", None, None
 
         max_stocks = int(max_stocks)
         prediction_days = int(prediction_days)
         min_increase_pct = float(min_increase_pct)
 
-        stocks_to_scan = all_stocks[:max_stocks]
+        if max_stocks >= len(all_stocks):
+            stocks_to_scan = all_stocks
+            max_stocks = len(all_stocks)
+        else:
+            stocks_to_scan = all_stocks[:max_stocks]
 
         predictor = ConditionalPredictor(checkpoint_path)
 
@@ -2255,14 +2491,18 @@ with gr.Blocks(title="A-Share Multi-Dimensional Financial Model", theme=gr.theme
 
             with gr.Row():
                 with gr.Column():
-                    scan_max_stocks = gr.Number(
-                        value=100,
-                        minimum=10,
-                        maximum=5000,
-                        step=10,
-                        label="Max Stocks to Scan / 扫描股票数",
-                        info="More stocks = better coverage but slower (Recommended: 100-500, Max: 5000)"
-                    )
+                    with gr.Row():
+                        scan_max_stocks = gr.Number(
+                            value=100,
+                            minimum=10,
+                            maximum=5000,
+                            step=10,
+                            label="Max Stocks to Scan / 扫描股票数",
+                            info="More stocks = better coverage but slower (Recommended: 100-500, Max: 5000)",
+                            scale=3
+                        )
+
+                        scan_all_btn = gr.Button("📊 Scan ALL Stocks", variant="secondary", size="sm", scale=1)
 
                     scan_prediction_days = gr.Number(
                         value=5,
@@ -2310,11 +2550,6 @@ with gr.Blocks(title="A-Share Multi-Dimensional Financial Model", theme=gr.theme
                     - Larger scans take longer but find more opportunities
                     """)
 
-            refresh_ckpt_pool_btn.click(
-                fn=lambda: gr.update(choices=get_available_checkpoints()),
-                outputs=checkpoint_path_pool
-            )
-
             with gr.Row():
                 pool_plot = gr.Plot(label="Stock Pool Analysis")
 
@@ -2333,10 +2568,129 @@ with gr.Blocks(title="A-Share Multi-Dimensional Financial Model", theme=gr.theme
                     wrap=True
                 )
 
+            refresh_ckpt_pool_btn.click(
+                fn=lambda: gr.update(choices=get_available_checkpoints()),
+                outputs=checkpoint_path_pool
+            )
+
+            scan_all_btn.click(
+                fn=lambda pred_days, ckpt, min_inc: scan_stock_pool(
+                    len(get_available_stocks()),
+                    pred_days,
+                    ckpt,
+                    min_inc
+                ),
+                inputs=[scan_prediction_days, checkpoint_path_pool, scan_min_increase],
+                outputs=[pool_output, pool_plot, pool_table]
+            )
+
             scan_btn.click(
                 fn=scan_stock_pool,
                 inputs=[scan_max_stocks, scan_prediction_days, checkpoint_path_pool, scan_min_increase],
                 outputs=[pool_output, pool_plot, pool_table]
+            )
+
+        with gr.Tab("📊 Industry Analysis / 行业分析"):
+            gr.Markdown("""
+            ## 📊 Industry Trend Analysis / 行业趋势分析
+
+            **Compare industry performance - Historical vs Predicted**
+
+            **功能说明：**
+            - 对比各行业的历史表现和未来预测
+            - 识别当前热门行业和未来潜力行业
+            - 发现行业轮动机会
+            - 支持行业配置决策
+
+            **How it works:**
+            1. Sample stocks from each industry
+            2. Calculate average historical return (last 30 days)
+            3. Predict average future return (configurable horizon)
+            4. Compare momentum shift between historical and predicted
+
+            **Key Metrics:**
+            - **Historical Return**: Past 30-day average performance
+            - **Predicted Return**: Future N-day average performance
+            - **Momentum Shift**: Predicted - Historical (positive = heating up)
+
+            **Use Cases:**
+            - **Sector Rotation**: Switch from cooling sectors to heating sectors
+            - **Portfolio Rebalancing**: Overweight hot industries
+            - **Risk Management**: Avoid industries with negative momentum
+            - **Market Timing**: Understand overall market sentiment by industries
+            """)
+
+            with gr.Row():
+                with gr.Column():
+                    industry_stocks_per = gr.Number(
+                        value=10,
+                        minimum=5,
+                        maximum=50,
+                        step=5,
+                        label="Stocks per Industry / 每行业股票数",
+                        info="More stocks = more accurate but slower (5-20 recommended)"
+                    )
+
+                    industry_pred_days = gr.Number(
+                        value=7,
+                        minimum=1,
+                        maximum=20,
+                        step=1,
+                        label="Prediction Horizon (days) / 预测周期",
+                        info="How many days ahead to predict"
+                    )
+
+                    available_checkpoints_industry = get_available_checkpoints()
+                    default_ckpt_industry = "checkpoints/multi_dim_model_20251115_014201_best.pt"
+                    if default_ckpt_industry not in available_checkpoints_industry:
+                        available_checkpoints_industry = [
+                            default_ckpt_industry,
+                            *[p for p in available_checkpoints_industry if p != default_ckpt_industry],
+                        ]
+
+                    checkpoint_path_industry = gr.Dropdown(
+                        choices=available_checkpoints_industry,
+                        value=available_checkpoints_industry[0] if available_checkpoints_industry else default_ckpt_industry,
+                        label="Checkpoint Path",
+                        info="Path to trained conditional model",
+                        allow_custom_value=True,
+                    )
+
+                    refresh_ckpt_industry_btn = gr.Button("🔄 Refresh Checkpoint List", variant="secondary", size="sm")
+
+                with gr.Column():
+                    industry_analyze_btn = gr.Button("📊 Analyze Industries", variant="primary", size="lg")
+                    gr.Markdown("""
+                    **Tips:**
+                    - 10 stocks per industry is usually sufficient
+                    - 7-day prediction balances accuracy and relevance
+                    - Analysis covers all major industries
+                    - Look for green bars in Momentum Shift chart
+                    """)
+
+            refresh_ckpt_industry_btn.click(
+                fn=lambda: gr.update(choices=get_available_checkpoints()),
+                outputs=checkpoint_path_industry
+            )
+
+            with gr.Row():
+                industry_plot = gr.Plot(label="Industry Trend Comparison")
+
+            with gr.Row():
+                industry_output = gr.Textbox(label="Analysis Results", lines=20)
+
+            with gr.Row():
+                industry_table = gr.Dataframe(
+                    label="Industry Performance Table",
+                    headers=['Industry', 'Stock Count', 'Historical 30d %', 'Predicted %', 'Momentum Shift %', 'Sample Stocks'],
+                    interactive=False,
+                    wrap=True
+                )
+
+            industry_analyze_btn.click(
+                fn=analyze_industry_trends,
+                inputs=[industry_stocks_per, industry_pred_days, checkpoint_path_industry],
+                outputs=[industry_output, industry_plot, industry_table]
             )
 
         with gr.Tab("📊 Backtesting"):
