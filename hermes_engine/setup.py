@@ -1,5 +1,19 @@
+"""Build hermes_fast._C — the custom CUDA extension.
+
+Build:
+    cd src/
+    TORCH_CUDA_ARCH_LIST=12.0 pip install -e . -v
+
+On 201:
+    export CUDA_HOME=/usr/local/cuda-13.1
+    export PATH="$CUDA_HOME/bin:$PATH"
+
+If the build fails, all Python imports still work — fused_ops.py falls back
+to torch.layer_norm + torch.add (slower but correct).
+"""
+
 import os
-from setuptools import setup, find_packages
+from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 ARCH_LIST = os.environ.get("TORCH_CUDA_ARCH_LIST", "12.0")
@@ -14,8 +28,6 @@ nvcc_flags = [
     "-U__CUDA_NO_HALF_CONVERSIONS__",
     "-U__CUDA_NO_BFLOAT16_OPERATORS__",
     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-    "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-    "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
     "--threads", "4",
 ]
 
@@ -30,13 +42,12 @@ for arch in ARCH_LIST.split(";"):
     ]
 
 cxx_flags = ["-O3", "-std=c++17"]
-if os.name == "nt":
-    cxx_flags = ["/O2", "/std:c++17"]
 
 ext = CUDAExtension(
-    name="hermes_engine._C",
+    name="hermes_fast._C",
     sources=[
-        "csrc/hermes_engine.cu",
+        "csrc/fused_ln_residual.cu",
+        "csrc/bindings.cpp",
     ],
     extra_compile_args={
         "cxx": cxx_flags,
@@ -46,11 +57,14 @@ ext = CUDAExtension(
 )
 
 setup(
-    name="hermes_engine",
+    name="hermes_fast",
     version="0.1.0",
-    description="Hermes CUDA inference engine for ConditionalFinancialModel (sm_120a Blackwell)",
-    packages=["hermes_engine"],
-    package_dir={"hermes_engine": "python"},
+    description="Custom training kernels for Spatiotemporal Hermes v1 (sm_120)",
+    packages=["hermes_fast", "hermes_fast.python"],
+    package_dir={
+        "hermes_fast": ".",
+        "hermes_fast.python": "python",
+    },
     ext_modules=[ext],
     cmdclass={"build_ext": BuildExtension},
     python_requires=">=3.10",
